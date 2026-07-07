@@ -69,11 +69,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
 		const systemPrompt =
 			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
 
+		const langInstruction = this.getLanguageInstruction();
+
 		const messages = [
 			{ role: "system" as const, content: systemPrompt },
 			{
 				role: "user" as const,
-				content: `Video Title: ${title}\n\nTranscript:\n${transcript}\n\nPlease summarize this video. To create links to relevant sections where the user requests, here is the video link: ${url}`,
+				content: `Video Title: ${title}\n\nTranscript:\n${transcript}\n\nPlease summarize this video.${langInstruction} To create links to relevant sections where the user requests, here is the video link: ${url}`,
 			},
 		];
 
@@ -126,6 +128,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
 		}
 	}
 
+		private getLanguageInstruction(): string {
+			const lang = this.settings.targetLanguage;
+			if (!lang || lang === "Auto" || lang === "English") return "";
+			return ` Output the summary in ${lang}.`;
+		}
+
 	public async generateSummary(
 		transcript: string,
 		title: string,
@@ -141,13 +149,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
 			const systemPrompt =
 				this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
 
+				const langInstruction = this.getLanguageInstruction();
+
 			const response = await this.client.chat.completions.create({
 				model: this.settings.model,
 				messages: [
 					{ role: "system", content: systemPrompt },
 					{
 						role: "user",
-						content: `Video Title: ${title}\n\nTranscript:\n${transcript}\n\nPlease summarize this video. To create links to relevant sections where the user requests, here is the video link: ${url}`,
+						content: `Video Title: ${title}\n\nTranscript:\n${transcript}\n\nPlease summarize this video.${langInstruction} To create links to relevant sections where the user requests, here is the video link: ${url}`,
 					},
 				],
 				temperature: 0.7,
@@ -191,6 +201,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
 		const mapPrompt =
 			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
 
+			const langInstruction = this.getLanguageInstruction();
+
 		for (let i = 0; i < chunks.length; i++) {
 			if (onProgress) {
 				onProgress("map", i + 1, chunks.length);
@@ -207,7 +219,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
 								`Video Title: ${title}\n\n` +
 								`This is part ${i + 1} of ${chunks.length} of the transcript.\n\n` +
 								`Transcript (Part ${i + 1}/${chunks.length}):\n${chunks[i]}\n\n` +
-								`Please summarize this part of the video. Focus on the key points in this section.`,
+								`Please summarize this part of the video.${langInstruction} Focus on the key points in this section.`,
 						},
 					],
 					temperature: 0.7,
@@ -258,7 +270,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
 							`Video Title: ${title}\n` +
 							`Video URL: ${url}\n\n` +
 							`The following are summaries of ${chunks.length} sections of the same video transcript. ` +
-							`Please merge them into a single coherent summary. Eliminate duplicate information ` +
+							`Please merge them into a single coherent summary.${langInstruction} Eliminate duplicate information ` +
 							`and organize the key points in a logical order.\n\n${summariesText}`,
 					},
 				],

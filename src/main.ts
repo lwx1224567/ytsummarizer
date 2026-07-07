@@ -524,5 +524,28 @@ class YTranslateSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						}),
 				);
+
+			new Setting(containerEl)
+			.setName("Target summary language")
+			.setDesc("Language for the output summary. LLM will translate the transcript content to this language. Select 'Auto' to use the same language as the transcript.")
+			.addDropdown((dropdown) => {
+			const languages = [
+			{ value: "Auto", label: "Auto (follow transcript)" },
+			{ value: "English", label: "English" },
+			{ value: "Chinese", label: "中文 (Chinese)" },
+			{ value: "Japanese", label: "日本語 (Japanese)" },
+			{ value: "Korean", label: "한국어 (Korean)" },
+			{ value: "Spanish", label: "Español (Spanish)" },
+			{ value: "French", label: "Français (French)" },
+			{ value: "German", label: "Deutsch (German)" },
+			];
+			languages.forEach((l) => dropdown.addOption(l.value, l.label));
+			dropdown
+			.setValue(this.plugin.settings.llm.targetLanguage)
+			.onChange(async (value) => {
+			this.plugin.settings.llm.targetLanguage = value;
+			await this.plugin.saveSettings();
+			});
+			});
 	}
 }

@@ -63,13 +63,24 @@ export class YoutubeTranscript {
 			const availableCaptions =
 				data?.captions?.playerCaptionsTracklistRenderer
 					?.captionTracks || [];
-			// If languageCode was specified then search for it's code, otherwise get the first.
+			// Language fallback chain: preferred → English → first available
 			let captionTrack = availableCaptions?.[0];
-			if (langCode)
-				captionTrack =
-					availableCaptions.find((track: any) =>
-						track.languageCode.includes(langCode),
-					) ?? availableCaptions?.[0];
+			if (langCode) {
+				// 1. Try preferred language
+				captionTrack = availableCaptions.find((track: any) =>
+					track.languageCode.includes(langCode),
+				);
+				// 2. Fallback: try English (unless preferred language IS English)
+				if (!captionTrack && langCode !== "en") {
+					captionTrack = availableCaptions.find((track: any) =>
+						track.languageCode.includes("en"),
+					);
+				}
+				// 3. Final fallback: first available caption track
+				if (!captionTrack) {
+					captionTrack = availableCaptions?.[0];
+				}
+			}
 
 			const captionsUrl = captionTrack?.baseUrl;
 			const fixedCaptionsUrl = captionsUrl.startsWith("https://")

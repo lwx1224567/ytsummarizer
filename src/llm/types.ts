@@ -7,6 +7,8 @@ export interface LLMSettings {
 	maxTokens: number;
 	/** Token threshold above which segmented (map-reduce) summarization is used. */
 	segmentedThreshold: number;
+	/** Target language for summary output (e.g., "Chinese", "Japanese", "English"). */
+	targetLanguage: string;
 }
 
 export interface ChunkSummary {
@@ -67,4 +69,5 @@ export const DEFAULT_LLM_SETTINGS: LLMSettings = {
 		"You are an assistant that summarizes YouTube video transcripts. Summarize the given transcript in a concise, clear, and understandable way. Highlight important points and remove unnecessary details.",
 	maxTokens: 1000,
 	segmentedThreshold: 4000,
+	targetLanguage: "English",
 };
