@@ -13,6 +13,20 @@ export interface LLMProvider {
 		title: string,
 		url: string,
 	): Promise<string>;
+	/**
+	 * Streaming variant of generateSummary. Calls `onChunk` for each text delta
+	 * received from the LLM, then resolves with the full accumulated text.
+	 *
+	 * If the stream fails before any content is received, falls back to
+	 * non-streaming `generateSummary()`. If it fails after partial content,
+	 * preserves the partial text and falls back.
+	 */
+	generateSummaryStream(
+		transcript: string,
+		title: string,
+		url: string,
+		onChunk: (chunk: string) => void,
+	): Promise<string>;
 	updateSettings(settings: LLMSettings): void;
 	isConfigured(): boolean;
 }

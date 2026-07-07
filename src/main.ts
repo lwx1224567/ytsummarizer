@@ -156,37 +156,71 @@ export default class YTranscriptPlugin extends Plugin {
 			// Generate summary
 			new Notice("Generating summary...");
 
-			// Show summary loading status
-			const contentWithLoadingMessage = `[${url}](${url})\n\n## Summary\n\n*Generating summary, please wait...*\n\n${content.substring(content.indexOf("## Transcript"))}`;
-
-			await this.app.vault.process(file, (currentContent) => contentWithLoadingMessage);
-
 			// Combine transcript text
 			let transcriptText = "";
 			blocks.forEach((block) => {
 				transcriptText += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
 			});
-			// blocks.map(block => block.quote).join(" ");
 
-			// Generate summary with OpenAI
-			const summary = await this.llmService.generateSummary(transcriptText, data.title, url);
+			// Write initial content with loading indicator
+			let initialContent = `[${url}](${url})\n\n## Summary\n\n*Generating summary...*\n\n`;
+			initialContent += `## Transcript\n\n`;
+			initialContent += `> [!faq]- Transcript Content\n`;
+			blocks.forEach((block) => {
+				initialContent += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
+			});
 
-			// Get current content
+			await this.app.vault.process(file, () => initialContent);
 
+			// Streaming: accumulate chunks and debounce file writes
+			let streamedSummary = "";
+			let writeTimer: ReturnType<typeof setTimeout> | null = null;
 
-			// Add summary to the beginning of the file
-			let updatedContent = `[${url}](${url})\n\n`;
+			const debouncedFlush = () => {
+				if (writeTimer) clearTimeout(writeTimer);
+				writeTimer = setTimeout(async () => {
+					const text = streamedSummary;
+					await this.app.vault.process(file, (currentContent) => {
+						const transcriptIdx = currentContent.indexOf("## Transcript");
+						const beforeTranscript =
+							transcriptIdx >= 0
+								? currentContent.substring(0, transcriptIdx)
+								: currentContent;
+						return `${beforeTranscript}## Summary\n\n${text}\n\n`;
+					});
+				}, 300);
+			};
+
+			const summary = await this.llmService.generateSummaryStream(
+				transcriptText,
+				data.title,
+				url,
+				(chunk: string) => {
+					streamedSummary += chunk;
+					debouncedFlush();
+				},
+			);
+
+			// Clear pending debounce and do final write
+			if (writeTimer) clearTimeout(writeTimer);
+
+			// Write final content
+			let finalContent = `[${url}](${url})\n\n`;
 
 			if (summary) {
-				updatedContent += `## Summary\n\n${summary}\n\n`;
+				finalContent += `## Summary\n\n${summary}\n\n`;
 			} else {
-				updatedContent += `## Summary\n\nFailed to generate summary.\n\n`;
+				finalContent += `## Summary\n\nFailed to generate summary.\n\n`;
 				new Notice("Failed to generate summary!");
 			}
 
-			// Update the file
-			await this.app.vault.process(file, (currentContent) => updatedContent + currentContent.substring(currentContent.indexOf("## Transcript"))
-			);
+			finalContent += `## Transcript\n\n`;
+			finalContent += `> [!faq]- Transcript Content\n`;
+			blocks.forEach((block) => {
+				finalContent += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
+			});
+
+			await this.app.vault.process(file, () => finalContent);
 
 			new Notice("Transcript and summary created!");
 

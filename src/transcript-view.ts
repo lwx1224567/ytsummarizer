@@ -213,7 +213,7 @@ export class TranscriptView extends ItemView {
 	 * Renders the summary button and container
 	 */
 	private renderSummaryButton() {
-		if (!this.plugin.settings.openai.apiKey) {
+		if (!this.plugin.llmService.isConfigured()) {
 			return;
 		}
 
@@ -251,7 +251,7 @@ export class TranscriptView extends ItemView {
 					.join(" ");
 
 				// Generate summary
-				this.summary = await this.plugin.openaiService.generateSummary(
+				this.summary = await this.plugin.llmService.generateSummary(
 					transcriptText,
 					this.videoTitle || "YouTube video",
 					this.currentUrl || ""
