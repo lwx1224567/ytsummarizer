@@ -11,7 +11,9 @@ import {
 import { TranscriptView, TRANSCRIPT_TYPE_VIEW } from "src/transcript-view";
 import { PromptModal, PromptAction } from "src/prompt-modal";
 import { EditorExtensions } from "../editor-extensions";
-import { DEFAULT_OPENAI_SETTINGS, OpenAIService, OpenAISettings } from "./openai-service";
+import { createLLMProvider } from "./llm/llm-service";
+import { DEFAULT_LLM_SETTINGS, LLMProvider, LLMSettings } from "./llm/types";
+import { PROVIDER_PRESETS, getProviderPreset } from "./llm/provider-registry";
 import { YoutubeTranscript } from "./fetch-transcript";
 import { formatTimestamp } from "./timestampt-utils";
 import { getTranscriptBlocks } from "./render-utils";
@@ -21,7 +23,7 @@ interface YTranscriptSettings {
 	lang: string;
 	country: string;
 	leafUrls: string[];
-	openai: OpenAISettings;
+	llm: LLMSettings;
 }
 
 const DEFAULT_SETTINGS: YTranscriptSettings = {
@@ -29,17 +31,17 @@ const DEFAULT_SETTINGS: YTranscriptSettings = {
 	lang: "en",
 	country: "EN",
 	leafUrls: [],
-	openai: DEFAULT_OPENAI_SETTINGS,
+	llm: DEFAULT_LLM_SETTINGS,
 };
 
 export default class YTranscriptPlugin extends Plugin {
 	settings: YTranscriptSettings;
-	openaiService: OpenAIService;
+	llmService: LLMProvider;
 
 	async onload() {
 		await this.loadSettings();
 
-		this.openaiService = new OpenAIService(this.settings.openai);
+		this.llmService = createLLMProvider(this.settings.llm);
 
 		this.registerView(
 			TRANSCRIPT_TYPE_VIEW,
@@ -167,7 +169,7 @@ export default class YTranscriptPlugin extends Plugin {
 			// blocks.map(block => block.quote).join(" ");
 
 			// Generate summary with OpenAI
-			const summary = await this.openaiService.generateSummary(transcriptText, data.title, url);
+			const summary = await this.llmService.generateSummary(transcriptText, data.title, url);
 
 			// Get current content
 
@@ -199,17 +201,29 @@ export default class YTranscriptPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			await this.loadData(),
-		);
+		const loaded = await this.loadData();
+		// Migrate legacy `openai` config block into the new `llm` block.
+		const raw = loaded as Record<string, unknown> | null;
+		if (raw && raw.openai && !raw.llm) {
+			const old = raw.openai as Record<string, unknown>;
+			raw.llm = {
+				provider: "openai",
+				apiKey: (old.apiKey as string) ?? "",
+				baseURL: "",
+				model: (old.model as string) ?? "gpt-4o-mini",
+				customPrompt:
+					(old.customPrompt as string) ?? DEFAULT_LLM_SETTINGS.customPrompt,
+				maxTokens: (old.maxTokens as number) ?? 1000,
+			};
+			delete raw.openai;
+		}
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-		if (this.openaiService) {
-			this.openaiService.updateSettings(this.settings.openai);
+		if (this.llmService) {
+			this.llmService.updateSettings(this.settings.llm);
 		}
 	}
 }
@@ -269,61 +283,142 @@ class YTranslateSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("OpenAI")
+			.setName("LLM provider")
 			.setHeading();
 
+		const preset = getProviderPreset(this.plugin.settings.llm.provider);
+
 		new Setting(containerEl)
-			.setName("OpenAI API key")
-			.setDesc("Enter your OpenAI API key")
+			.setName("Provider")
+			.setDesc(
+				"Backend for summaries. Free/cheap options: 智谱 GLM-4-Flash (free), Gemini (free tier), Ollama (local/free), DeepSeek (very cheap).",
+			)
+			.addDropdown((dropdown) => {
+				PROVIDER_PRESETS.forEach((p) => dropdown.addOption(p.id, p.label));
+				dropdown
+					.setValue(this.plugin.settings.llm.provider)
+					.onChange(async (value) => {
+						const next = getProviderPreset(value);
+						this.plugin.settings.llm.provider = value;
+						if (next) {
+							this.plugin.settings.llm.baseURL = next.baseURL;
+							const stillValid =
+								next.allowCustomModel ||
+								next.models.some(
+									(m) => m.value === this.plugin.settings.llm.model,
+								);
+							if (!stillValid && next.models.length > 0) {
+								this.plugin.settings.llm.model = next.models[0].value;
+							}
+						}
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("API base URL")
+			.setDesc("OpenAI-compatible endpoint. Leave empty for official OpenAI.")
 			.addText((text) =>
 				text
-					.setPlaceholder("sk-...")
-					.setValue(this.plugin.settings.openai.apiKey)
+					.setPlaceholder(
+						preset && preset.baseURL
+							? preset.baseURL
+							: "https://api.openai.com/v1",
+					)
+					.setValue(this.plugin.settings.llm.baseURL)
 					.onChange(async (value) => {
-						this.plugin.settings.openai.apiKey = value;
+						this.plugin.settings.llm.baseURL = value;
 						await this.plugin.saveSettings();
 					}),
 			);
 
 		new Setting(containerEl)
-			.setName("OpenAI model")
-			.setDesc("Select the OpenAI model to use")
+			.setName("API key")
+			.setDesc(
+				!preset || preset.needsApiKey
+					? preset && preset.helpUrl
+						? `Get your key from ${preset.helpUrl}`
+						: "Enter your API key"
+					: "Ollama does not require an API key — leave empty.",
+			)
+			.addText((text) => {
+				if (preset && !preset.needsApiKey) {
+					text.setDisabled(true);
+					text.setPlaceholder("(not required)");
+				} else {
+					text.setPlaceholder(preset ? preset.apiKeyPlaceholder : "sk-...");
+					text.setValue(this.plugin.settings.llm.apiKey);
+					text.onChange(async (value) => {
+						this.plugin.settings.llm.apiKey = value;
+						await this.plugin.saveSettings();
+					});
+				}
+			});
+
+		new Setting(containerEl)
+			.setName("Model")
+			.setDesc(
+				preset && preset.allowCustomModel
+					? "Enter the model name (e.g. qwen2.5, llama3.2; for MiMo run `ollama pull` first)"
+					: "Select the model to use",
+			)
 			.addDropdown((dropdown) => {
-				dropdown
-					.addOption("gpt-4o-mini", "GPT-4o Mini")
-					.addOption("gpt-3.5-turbo", "GPT-3.5 Turbo")
-					.addOption("gpt-4o", "GPT-4o")
-					.setValue(this.plugin.settings.openai.model)
+				if (preset && !preset.allowCustomModel) {
+					preset.models.forEach((m) => dropdown.addOption(m.value, m.label));
+					dropdown.setValue(this.plugin.settings.llm.model);
+					dropdown.onChange(async (value) => {
+						this.plugin.settings.llm.model = value;
+						await this.plugin.saveSettings();
+					});
+				} else {
+					dropdown.selectEl.style.display = "none";
+				}
+			})
+			.addText((text) => {
+				if (!preset || !preset.allowCustomModel) {
+					text.inputEl.style.display = "none";
+					return;
+				}
+				text
+					.setPlaceholder(
+						preset.id === "ollama"
+							? "e.g. qwen2.5, llama3.2, deepseek-r1:7b"
+							: "model name",
+					)
+					.setValue(this.plugin.settings.llm.model)
 					.onChange(async (value) => {
-						this.plugin.settings.openai.model = value;
+						this.plugin.settings.llm.model = value;
 						await this.plugin.saveSettings();
 					});
 			});
+
 		new Setting(containerEl)
 			.setName("Custom summary prompt")
 			.setDesc("Enter a custom prompt to use when generating summaries. Leave empty to use the default prompt.")
 			.addTextArea((textarea) => {
 				textarea
-					.setPlaceholder(DEFAULT_OPENAI_SETTINGS.customPrompt)
-					.setValue(this.plugin.settings.openai.customPrompt)
+					.setPlaceholder(DEFAULT_LLM_SETTINGS.customPrompt)
+					.setValue(this.plugin.settings.llm.customPrompt)
 					.onChange(async (value) => {
-						this.plugin.settings.openai.customPrompt = value;
+						this.plugin.settings.llm.customPrompt = value;
 						await this.plugin.saveSettings();
 					});
 				textarea.inputEl.rows = 6;
 				textarea.inputEl.cols = 50;
 			});
+
 		new Setting(containerEl)
 			.setName("Max tokens")
-			.setDesc("Maximum number of tokens to generate for the summary (1-4000)")
+			.setDesc("Maximum number of tokens to generate for the summary (10-10000)")
 			.addText((text) =>
 				text
-					.setPlaceholder("2000")
-					.setValue(this.plugin.settings.openai.maxTokens.toString())
+					.setPlaceholder("1000")
+					.setValue(this.plugin.settings.llm.maxTokens.toString())
 					.onChange(async (value) => {
 						const tokens = Number.parseInt(value);
-						this.plugin.settings.openai.maxTokens = Number.isNaN(tokens) || tokens < 10 || tokens > 10000
-							? 2000
+						this.plugin.settings.llm.maxTokens = Number.isNaN(tokens) || tokens < 10 || tokens > 10000
+							? 1000
 							: tokens;
 						await this.plugin.saveSettings();
 					}),
