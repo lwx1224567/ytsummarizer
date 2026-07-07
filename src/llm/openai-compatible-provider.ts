@@ -1,7 +1,14 @@
 import { OpenAI } from "openai";
 import { Notice } from "obsidian";
-import { DEFAULT_LLM_SETTINGS, LLMProvider, LLMSettings } from "./types";
+import {
+	DEFAULT_LLM_SETTINGS,
+	LLMProvider,
+	LLMSettings,
+	SegmentedSummaryResult,
+	ChunkSummary,
+} from "./types";
 import { getProviderPreset } from "./provider-registry";
+import { splitTranscript, estimateTokens } from "../render-utils";
 
 /**
  * Generic provider that talks to any OpenAI-compatible /v1/chat/completions
@@ -153,5 +160,120 @@ export class OpenAICompatibleProvider implements LLMProvider {
 			const detail = error instanceof Error ? error.message : String(error);
 			throw new Error(`Summary generation failed: ${detail}`);
 		}
+	}
+
+	public async generateSegmentedSummary(
+		transcript: string,
+		title: string,
+		url: string,
+		onProgress?: (phase: string, done: number, total: number) => void,
+	): Promise<SegmentedSummaryResult> {
+		if (!this.client) {
+			throw new Error(
+				"LLM is not configured. Please set your API key / endpoint in the plugin settings.",
+			);
+		}
+
+		const chunkTokens = this.settings.segmentedThreshold || 4000;
+		const chunks = splitTranscript(transcript, chunkTokens);
+
+		// Single chunk — no need for map-reduce
+		if (chunks.length <= 1) {
+			const summary = await this.generateSummary(transcript, title, url);
+			return {
+				chunkSummaries: [{ index: 1, summary }],
+				mergedSummary: summary,
+			};
+		}
+
+		// ── Map phase: summarize each chunk ──
+		const chunkSummaries: ChunkSummary[] = [];
+		const mapPrompt =
+			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
+
+		for (let i = 0; i < chunks.length; i++) {
+			if (onProgress) {
+				onProgress("map", i + 1, chunks.length);
+			}
+
+			try {
+				const response = await this.client.chat.completions.create({
+					model: this.settings.model,
+					messages: [
+						{ role: "system", content: mapPrompt },
+						{
+							role: "user",
+							content:
+								`Video Title: ${title}\n\n` +
+								`This is part ${i + 1} of ${chunks.length} of the transcript.\n\n` +
+								`Transcript (Part ${i + 1}/${chunks.length}):\n${chunks[i]}\n\n` +
+								`Please summarize this part of the video. Focus on the key points in this section.`,
+						},
+					],
+					temperature: 0.7,
+					max_tokens: this.settings.maxTokens,
+				});
+
+				const text =
+					response.choices[0]?.message?.content ||
+					`Failed to summarize part ${i + 1}.`;
+
+				chunkSummaries.push({ index: i + 1, summary: text });
+			} catch (error) {
+				console.error(`Chunk ${i + 1} summary failed:`, error);
+				chunkSummaries.push({
+					index: i + 1,
+					summary: "",
+					error: `Failed to summarize part ${i + 1}.`,
+				});
+			}
+		}
+
+		// ── Reduce phase: merge chunk summaries ──
+		if (onProgress) {
+			onProgress("reduce", chunks.length, chunks.length);
+		}
+
+		let mergedSummary = "";
+		try {
+			const summariesText = chunkSummaries
+				.map(
+					(c) =>
+						`### Part ${c.index} Summary\n${c.summary}` +
+						(c.error ? `\n(Error: ${c.error})` : ""),
+				)
+				.join("\n\n");
+
+			const mergeResponse = await this.client.chat.completions.create({
+				model: this.settings.model,
+				messages: [
+					{
+						role: "system",
+						content:
+							"You are an assistant that merges multiple section summaries into one coherent overall summary. Remove duplicate points, organize logically, and produce a clean final summary.",
+					},
+					{
+						role: "user",
+						content:
+							`Video Title: ${title}\n` +
+							`Video URL: ${url}\n\n` +
+							`The following are summaries of ${chunks.length} sections of the same video transcript. ` +
+							`Please merge them into a single coherent summary. Eliminate duplicate information ` +
+							`and organize the key points in a logical order.\n\n${summariesText}`,
+					},
+				],
+				temperature: 0.7,
+				max_tokens: this.settings.maxTokens * 2,
+			});
+
+			mergedSummary =
+				mergeResponse.choices[0]?.message?.content ||
+				"Failed to merge summaries.";
+		} catch (error) {
+			console.error("Merge summaries failed:", error);
+			mergedSummary = "Failed to merge section summaries.";
+		}
+
+		return { chunkSummaries, mergedSummary };
 	}
 }

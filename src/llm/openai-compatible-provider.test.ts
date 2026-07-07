@@ -221,4 +221,147 @@ describe("OpenAICompatibleProvider", () => {
 			);
 		});
 	});
+
+	describe("generateSegmentedSummary", () => {
+		it("should return single chunk when transcript fits in one chunk", async () => {
+			const mockCreate = jest.fn().mockResolvedValue({
+				choices: [{ message: { content: "Single chunk summary." } }],
+			});
+			MockedOpenAI.mockImplementation(
+				() =>
+					({
+						chat: { completions: { create: mockCreate } },
+					}) as unknown as OpenAI,
+			);
+
+			const provider = new OpenAICompatibleProvider(
+				makeSettings({ segmentedThreshold: 4000 }),
+			);
+
+			const result = await provider.generateSegmentedSummary(
+				"Short transcript text.",
+				"Test Video",
+				"https://example.com",
+			);
+
+			expect(result.chunkSummaries).toHaveLength(1);
+			expect(result.mergedSummary).toBe("Single chunk summary.");
+			expect(mockCreate).toHaveBeenCalledTimes(1);
+		});
+
+		it("should map-reduce long transcripts", async () => {
+			// Build text that's ~250 chars to produce exactly 2 chunks with threshold 30 tokens (120 chars)
+			const longText = "This is a long transcript sentence. ".repeat(10);
+
+			let callCount = 0;
+			const mockCreate = jest.fn().mockImplementation(() => {
+				callCount++;
+				return Promise.resolve({
+					choices: [{ message: { content: `Response ${callCount}.` } }],
+				});
+			});
+
+			MockedOpenAI.mockImplementation(
+				() =>
+					({
+						chat: { completions: { create: mockCreate } },
+					}) as unknown as OpenAI,
+			);
+
+			const provider = new OpenAICompatibleProvider(
+				makeSettings({ segmentedThreshold: 30 }), // 30 tokens = 120 chars → 2 chunks
+			);
+
+			const result = await provider.generateSegmentedSummary(
+				longText,
+				"Long Video",
+				"https://example.com",
+			);
+
+			expect(result.chunkSummaries.length).toBeGreaterThanOrEqual(2);
+			expect(result.mergedSummary).toBeTruthy();
+			expect(mockCreate).toHaveBeenCalledTimes(result.chunkSummaries.length + 1); // N map + 1 reduce
+		});
+
+		it("should call onProgress during map and reduce phases", async () => {
+			const longText = "A sentence. ".repeat(30);
+			let callCount = 0;
+			const mockCreate = jest.fn().mockImplementation(() => {
+				callCount++;
+				return Promise.resolve({
+					choices: [{ message: { content: `Response ${callCount}.` } }],
+				});
+			});
+
+			MockedOpenAI.mockImplementation(
+				() =>
+					({
+						chat: { completions: { create: mockCreate } },
+					}) as unknown as OpenAI,
+			);
+
+			const provider = new OpenAICompatibleProvider(
+				makeSettings({ segmentedThreshold: 40 }),
+			);
+
+			const progressCalls: Array<[string, number, number]> = [];
+			await provider.generateSegmentedSummary(
+				longText,
+				"Progress Test",
+				"https://example.com",
+				(phase, done, total) => {
+					progressCalls.push([phase, done, total]);
+				},
+			);
+
+			// Should have at least map progress calls + one reduce
+			expect(progressCalls.length).toBeGreaterThan(0);
+			const mapCalls = progressCalls.filter(([p]) => p === "map");
+			const reduceCalls = progressCalls.filter(([p]) => p === "reduce");
+			expect(mapCalls.length).toBeGreaterThanOrEqual(1);
+			expect(reduceCalls.length).toBe(1);
+		});
+
+		it("should handle chunk failure gracefully and continue", async () => {
+			const longText = "A sentence here. ".repeat(30);
+			let callCount = 0;
+			const mockCreate = jest.fn().mockImplementation(() => {
+				callCount++;
+				if (callCount === 1) {
+					return Promise.reject(new Error("Chunk API error"));
+				}
+				return Promise.resolve({
+					choices: [{ message: { content: `Response ${callCount}.` } }],
+				});
+			});
+
+			MockedOpenAI.mockImplementation(
+				() =>
+					({
+						chat: { completions: { create: mockCreate } },
+					}) as unknown as OpenAI,
+			);
+
+			const provider = new OpenAICompatibleProvider(
+				makeSettings({ segmentedThreshold: 40 }),
+			);
+
+			const result = await provider.generateSegmentedSummary(
+				longText,
+				"Error Test",
+				"https://example.com",
+			);
+
+			// First chunk should have error
+			const failedChunk = result.chunkSummaries.find((c) => c.index === 1);
+			expect(failedChunk?.error).toBeDefined();
+
+			// Second chunk should be fine
+			const goodChunk = result.chunkSummaries.find((c) => c.index === 2);
+			expect(goodChunk?.summary).toBe("Response 2.");
+
+			// Merged summary should still be produced
+			expect(result.mergedSummary).toBeTruthy();
+		});
+	});
 });

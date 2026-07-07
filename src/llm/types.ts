@@ -5,6 +5,19 @@ export interface LLMSettings {
 	model: string;
 	customPrompt: string;
 	maxTokens: number;
+	/** Token threshold above which segmented (map-reduce) summarization is used. */
+	segmentedThreshold: number;
+}
+
+export interface ChunkSummary {
+	index: number;
+	summary: string;
+	error?: string;
+}
+
+export interface SegmentedSummaryResult {
+	chunkSummaries: ChunkSummary[];
+	mergedSummary: string;
 }
 
 export interface LLMProvider {
@@ -27,6 +40,20 @@ export interface LLMProvider {
 		url: string,
 		onChunk: (chunk: string) => void,
 	): Promise<string>;
+	/**
+	 * Map-reduce summarization for long transcripts. Splits the transcript
+	 * into chunks, summarizes each independently (map phase), then merges
+	 * all chunk summaries into a coherent final summary (reduce phase).
+	 *
+	 * Uses the provider's configured `segmentedThreshold` to decide the
+	 * max tokens per chunk.
+	 */
+	generateSegmentedSummary(
+		transcript: string,
+		title: string,
+		url: string,
+		onProgress?: (phase: string, done: number, total: number) => void,
+	): Promise<SegmentedSummaryResult>;
 	updateSettings(settings: LLMSettings): void;
 	isConfigured(): boolean;
 }
@@ -39,4 +66,5 @@ export const DEFAULT_LLM_SETTINGS: LLMSettings = {
 	customPrompt:
 		"You are an assistant that summarizes YouTube video transcripts. Summarize the given transcript in a concise, clear, and understandable way. Highlight important points and remove unnecessary details.",
 	maxTokens: 1000,
+	segmentedThreshold: 4000,
 };

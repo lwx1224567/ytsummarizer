@@ -156,69 +156,116 @@ export default class YTranscriptPlugin extends Plugin {
 			// Generate summary
 			new Notice("Generating summary...");
 
-			// Combine transcript text
+			// Build plain transcript text (for LLM) and formatted (for Markdown)
 			let transcriptText = "";
+			const transcriptLines = data.lines.map((line) => line.text);
+			transcriptText = transcriptLines.join(" ");
+
+			let formattedTranscript = "";
 			blocks.forEach((block) => {
-				transcriptText += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
+				formattedTranscript += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
 			});
 
 			// Write initial content with loading indicator
 			let initialContent = `[${url}](${url})\n\n## Summary\n\n*Generating summary...*\n\n`;
 			initialContent += `## Transcript\n\n`;
 			initialContent += `> [!faq]- Transcript Content\n`;
-			blocks.forEach((block) => {
-				initialContent += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
-			});
+			initialContent += formattedTranscript;
 
 			await this.app.vault.process(file, () => initialContent);
 
-			// Streaming: accumulate chunks and debounce file writes
-			let streamedSummary = "";
-			let writeTimer: ReturnType<typeof setTimeout> | null = null;
+			// Decide: streaming (short transcript) vs segmented (long transcript)
+			const threshold = this.settings.llm.segmentedThreshold || 4000;
+			const estimatedTokens = Math.ceil(transcriptText.length / 4);
+			const needsSegmentation = estimatedTokens > threshold;
 
-			const debouncedFlush = () => {
-				if (writeTimer) clearTimeout(writeTimer);
-				writeTimer = setTimeout(async () => {
-					const text = streamedSummary;
-					await this.app.vault.process(file, (currentContent) => {
-						const transcriptIdx = currentContent.indexOf("## Transcript");
-						const beforeTranscript =
-							transcriptIdx >= 0
-								? currentContent.substring(0, transcriptIdx)
-								: currentContent;
-						return `${beforeTranscript}## Summary\n\n${text}\n\n`;
-					});
-				}, 300);
-			};
-
-			const summary = await this.llmService.generateSummaryStream(
-				transcriptText,
-				data.title,
-				url,
-				(chunk: string) => {
-					streamedSummary += chunk;
-					debouncedFlush();
-				},
-			);
-
-			// Clear pending debounce and do final write
-			if (writeTimer) clearTimeout(writeTimer);
-
-			// Write final content
 			let finalContent = `[${url}](${url})\n\n`;
 
-			if (summary) {
-				finalContent += `## Summary\n\n${summary}\n\n`;
+			if (needsSegmentation) {
+				// ── Segmented (map-reduce) path ──
+				const progressNotice = new Notice("Summarizing long transcript (0%)...", 0);
+
+				const result = await this.llmService.generateSegmentedSummary(
+					transcriptText,
+					data.title,
+					url,
+					(phase: string, done: number, total: number) => {
+						if (phase === "map") {
+							const pct = Math.round((done / total) * 100);
+							progressNotice.setMessage(
+								`Summarizing part ${done}/${total} (${pct}%)...`,
+							);
+						} else {
+							progressNotice.setMessage("Merging section summaries...");
+						}
+					},
+				);
+
+				progressNotice.hide();
+
+				// Build structured output: merged summary + section summaries
+				finalContent += `## Summary\n\n${result.mergedSummary}\n\n`;
+
+				if (result.chunkSummaries.length > 1) {
+					finalContent += `> [!faq]- Section Summaries (${result.chunkSummaries.length} parts)\n`;
+					result.chunkSummaries.forEach((c) => {
+						if (c.error) {
+							finalContent += `> **Part ${c.index}**: ${c.error}\n>\n`;
+						} else {
+							finalContent += `> **Part ${c.index}**: ${c.summary.replace(/\n/g, "\n> ")}\n>\n`;
+						}
+					});
+					finalContent += `\n`;
+				}
+
+				if (!result.mergedSummary || result.mergedSummary === "Failed to merge section summaries.") {
+					new Notice("Failed to generate summary!");
+				}
 			} else {
-				finalContent += `## Summary\n\nFailed to generate summary.\n\n`;
-				new Notice("Failed to generate summary!");
+				// ── Streaming (single-call) path ──
+				let streamedSummary = "";
+				let writeTimer: ReturnType<typeof setTimeout> | null = null;
+
+				const debouncedFlush = () => {
+					if (writeTimer) clearTimeout(writeTimer);
+					writeTimer = setTimeout(async () => {
+						const text = streamedSummary;
+						await this.app.vault.process(file, (currentContent) => {
+							const transcriptIdx = currentContent.indexOf("## Transcript");
+							const beforeTranscript =
+								transcriptIdx >= 0
+									? currentContent.substring(0, transcriptIdx)
+									: currentContent;
+							return `${beforeTranscript}## Summary\n\n${text}\n\n`;
+						});
+					}, 300);
+				};
+
+				const summary = await this.llmService.generateSummaryStream(
+					transcriptText,
+					data.title,
+					url,
+					(chunk: string) => {
+						streamedSummary += chunk;
+						debouncedFlush();
+					},
+				);
+
+				// Clear pending debounce
+				if (writeTimer) clearTimeout(writeTimer);
+
+				if (summary) {
+					finalContent += `## Summary\n\n${summary}\n\n`;
+				} else {
+					finalContent += `## Summary\n\nFailed to generate summary.\n\n`;
+					new Notice("Failed to generate summary!");
+				}
 			}
 
+			// Append transcript
 			finalContent += `## Transcript\n\n`;
 			finalContent += `> [!faq]- Transcript Content\n`;
-			blocks.forEach((block) => {
-				finalContent += `> **[${formatTimestamp(block.quoteTimeOffset)}]** ${block.quote}\n>\n`;
-			});
+			finalContent += formattedTranscript;
 
 			await this.app.vault.process(file, () => finalContent);
 
@@ -457,5 +504,25 @@ class YTranslateSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+			new Setting(containerEl)
+				.setName("Segmented summary threshold")
+				.setDesc(
+					"Transcripts exceeding this estimated token count will be split into chunks, " +
+					"each summarized independently, then merged. Lower = trigger segmentation more often. " +
+					"Default 4000 tokens (~16K characters). Set higher if your model has a large context window.",
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("4000")
+						.setValue(this.plugin.settings.llm.segmentedThreshold.toString())
+						.onChange(async (value) => {
+							const tokens = Number.parseInt(value);
+							this.plugin.settings.llm.segmentedThreshold = Number.isNaN(tokens) || tokens < 500
+								? 4000
+								: tokens;
+							await this.plugin.saveSettings();
+						}),
+				);
 	}
 }
