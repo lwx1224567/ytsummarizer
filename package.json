@@ -8,7 +8,8 @@
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"test": "jest",
-		"check-format": "npx prettier --check src"
+		"check-format": "npx prettier --check src",
+		"deploy": "npm run build && node -e \"require('./esbuild.config.mjs')\" || true"
 	},
 	"keywords": [],
 	"author": "",

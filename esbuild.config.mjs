@@ -1,5 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
+import fs from "fs";
+import path from "path";
 import builtins from "builtin-modules";
 
 const banner = `/*
@@ -10,11 +12,29 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === "production";
 
+// Vault plugin path for local testing
+// Override with OBSIDIAN_VAULT env var if your vault is elsewhere:
+const vaultPath = process.env.OBSIDIAN_VAULT || "E:/Files/1/mynote";
+const vaultPluginDir = path.join(vaultPath, ".obsidian", "plugins", "yt-summarizer");
+
+function copyToVault() {
+	if (!vaultPluginDir) return;
+	try {
+		if (!fs.existsSync(vaultPluginDir)) {
+			fs.mkdirSync(vaultPluginDir, { recursive: true });
+		}
+		fs.copyFileSync("main.js", path.join(vaultPluginDir, "main.js"));
+		fs.copyFileSync("manifest.json", path.join(vaultPluginDir, "manifest.json"));
+		fs.copyFileSync("styles.css", path.join(vaultPluginDir, "styles.css"));
+		console.log(`[deploy] Copied to ${vaultPluginDir}`);
+	} catch (e) {
+		console.warn("[deploy] Failed to copy to vault:", e.message);
+	}
+}
+
 esbuild
 	.build({
-		banner: {
-			js: banner,
-		},
+		banner: { js: banner },
 		entryPoints: ["src/main.ts"],
 		bundle: true,
 		external: [
@@ -34,11 +54,28 @@ esbuild
 			...builtins,
 		],
 		format: "cjs",
-		watch: !prod,
+		watch: !prod
+			? {
+					onRebuild(error) {
+						if (error) {
+							console.error("[watch] Build failed:", error);
+						} else {
+							console.log("[watch] Rebuilt OK");
+							copyToVault();
+						}
+					},
+				}
+			: false,
 		target: "es2018",
 		logLevel: "info",
 		sourcemap: prod ? false : "inline",
 		treeShaking: true,
 		outfile: "main.js",
+	})
+	.then(() => {
+		if (prod) copyToVault();
+		if (!prod && vaultPluginDir) {
+			console.log(`[watch] Auto-deploying to: ${vaultPluginDir}`);
+		}
 	})
 	.catch(() => process.exit(1));
