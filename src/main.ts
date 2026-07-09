@@ -17,12 +17,14 @@ import { PROVIDER_PRESETS, getProviderPreset } from "./llm/provider-registry";
 import { YoutubeTranscript } from "./fetch-transcript";
 import { formatTimestamp } from "./timestampt-utils";
 import { getTranscriptBlocks } from "./render-utils";
+import { t, UILanguage } from "./i18n";
 
 interface YTranscriptSettings {
 	timestampMod: number;
 	lang: string;
 	country: string;
 	leafUrls: string[];
+	uiLanguage: UILanguage;
 	llm: LLMSettings;
 }
 
@@ -31,6 +33,7 @@ const DEFAULT_SETTINGS: YTranscriptSettings = {
 	lang: "en",
 	country: "EN",
 	leafUrls: [],
+	uiLanguage: "en",
 	llm: DEFAULT_LLM_SETTINGS,
 };
 
@@ -98,12 +101,15 @@ export default class YTranscriptPlugin extends Plugin {
 			type: TRANSCRIPT_TYPE_VIEW,
 		});
 		this.app.workspace.revealLeaf(leaf);
-		leaf.setEphemeralState({
-			url,
-		});
+		// Call the view directly instead of relying on setEphemeralState
+		const view = leaf.view as TranscriptView;
+		if (view) {
+			view.loadTranscript(url);
+		}
 	}
 
 	async createNewPageWithTranscript(url: string) {
+		let file: TFile | undefined;
 		try {
 			// Create a temporary file name
 			const tempFileName = `YouTube Transcript - Loading...`;
@@ -241,15 +247,20 @@ export default class YTranscriptPlugin extends Plugin {
 					}, 300);
 				};
 
-				const summary = await this.llmService.generateSummaryStream(
-					transcriptText,
-					data.title,
-					url,
-					(chunk: string) => {
-						streamedSummary += chunk;
-						debouncedFlush();
-					},
-				);
+					const summary = await Promise.race([
+						this.llmService.generateSummaryStream(
+							transcriptText,
+							data.title,
+							url,
+							(chunk: string) => {
+								streamedSummary += chunk;
+								debouncedFlush();
+							},
+						),
+						new Promise<string>((_, reject) =>
+							setTimeout(() => reject(new Error("Summary timed out after 60s. Check your API key and network.")), 60000)
+						),
+					]);
 
 				// Clear pending debounce
 				if (writeTimer) clearTimeout(writeTimer);
@@ -273,7 +284,26 @@ export default class YTranscriptPlugin extends Plugin {
 
 		} catch (error) {
 			console.error("Error creating transcript:", error);
-			new Notice("An error occurred while creating the transcript!");
+			const detail = error instanceof Error ? error.message : String(error);
+			new Notice(`Failed: ${detail}`);
+			// Try to update the file with error info
+			try {
+				const f = file;
+				if (f) {
+					await this.app.vault.process(f, (currentContent) => {
+						const idx = currentContent.indexOf("## Transcript");
+						if (idx >= 0) {
+							const before = currentContent.substring(0, idx);
+							return `${before}## Summary
+
+Failed: ${detail}
+
+`;
+						}
+						return currentContent;
+					});
+				}
+			} catch (_) { /* ignore */ }
 		}
 	}
 
@@ -295,10 +325,18 @@ export default class YTranscriptPlugin extends Plugin {
 				customPrompt:
 					(old.customPrompt as string) ?? DEFAULT_LLM_SETTINGS.customPrompt,
 				maxTokens: (old.maxTokens as number) ?? 1000,
+				segmentedThreshold:
+					(old.segmentedThreshold as number) ?? DEFAULT_LLM_SETTINGS.segmentedThreshold,
+				targetLanguage:
+					(old.targetLanguage as string) ?? DEFAULT_LLM_SETTINGS.targetLanguage,
 			};
 			delete raw.openai;
 		}
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+		// Deep-merge llm so that new fields added in future versions get defaults.
+		if (this.settings.llm) {
+			this.settings.llm = Object.assign({}, DEFAULT_LLM_SETTINGS, this.settings.llm);
+		}
 	}
 
 	async saveSettings() {
@@ -322,11 +360,30 @@ class YTranslateSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
+		const lang = this.plugin.settings.uiLanguage || "en";
+		function tr(key: Parameters<typeof t>[1]): string {
+			return t(lang, key);
+		}
+
+		// ── UI Language ──
 		new Setting(containerEl)
-			.setName("Timestamp interval")
-			.setDesc(
-				"Indicates how often timestamp should occur in text (1 - every line, 10 - every 10 lines)",
-			)
+			.setName(tr("uiLanguage"))
+			.setDesc(tr("uiLanguageDesc"))
+			.addDropdown((dropdown) => {
+				dropdown.addOption("en", "English");
+				dropdown.addOption("zh", "中文");
+				dropdown
+					.setValue(lang)
+					.onChange(async (value) => {
+						this.plugin.settings.uiLanguage = value as UILanguage;
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName(tr("timestampInterval"))
+			.setDesc(tr("timestampIntervalDesc"))
 			.addText((text) =>
 				text
 					.setValue(this.plugin.settings.timestampMod.toFixed())
@@ -340,8 +397,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Language")
-			.setDesc("Preferred transcript language")
+			.setName(tr("language"))
+			.setDesc(tr("languageDesc"))
 			.addText((text) =>
 				text
 					.setValue(this.plugin.settings.lang)
@@ -352,8 +409,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Country")
-			.setDesc("Preferred transcript country code")
+			.setName(tr("country"))
+			.setDesc(tr("countryDesc"))
 			.addText((text) =>
 				text
 					.setValue(this.plugin.settings.country)
@@ -364,16 +421,14 @@ class YTranslateSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("LLM provider")
+			.setName(tr("llmProvider"))
 			.setHeading();
 
 		const preset = getProviderPreset(this.plugin.settings.llm.provider);
 
 		new Setting(containerEl)
-			.setName("Provider")
-			.setDesc(
-				"Backend for summaries. Free/cheap options: 智谱 GLM-4-Flash (free), Gemini (free tier), Ollama (local/free), DeepSeek (very cheap).",
-			)
+			.setName(tr("provider"))
+			.setDesc(tr("providerDesc"))
 			.addDropdown((dropdown) => {
 				PROVIDER_PRESETS.forEach((p) => dropdown.addOption(p.id, p.label));
 				dropdown
@@ -398,8 +453,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("API base URL")
-			.setDesc("OpenAI-compatible endpoint. Leave empty for official OpenAI.")
+			.setName(tr("apiBaseUrl"))
+			.setDesc(tr("apiBaseUrlDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder(
@@ -415,18 +470,18 @@ class YTranslateSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("API key")
+			.setName(tr("apiKey"))
 			.setDesc(
 				!preset || preset.needsApiKey
 					? preset && preset.helpUrl
 						? `Get your key from ${preset.helpUrl}`
-						: "Enter your API key"
-					: "Ollama does not require an API key — leave empty.",
+						: tr("apiKeyDescDefault")
+					: tr("apiKeyDescOllama"),
 			)
 			.addText((text) => {
 				if (preset && !preset.needsApiKey) {
 					text.setDisabled(true);
-					text.setPlaceholder("(not required)");
+					text.setPlaceholder(tr("notRequired"));
 				} else {
 					text.setPlaceholder(preset ? preset.apiKeyPlaceholder : "sk-...");
 					text.setValue(this.plugin.settings.llm.apiKey);
@@ -438,11 +493,11 @@ class YTranslateSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Model")
+			.setName(tr("model"))
 			.setDesc(
 				preset && preset.allowCustomModel
-					? "Enter the model name (e.g. qwen2.5, llama3.2; for MiMo run `ollama pull` first)"
-					: "Select the model to use",
+					? tr("modelDescCustom")
+					: tr("modelDescSelect"),
 			)
 			.addDropdown((dropdown) => {
 				if (preset && !preset.allowCustomModel) {
@@ -475,8 +530,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Custom summary prompt")
-			.setDesc("Enter a custom prompt to use when generating summaries. Leave empty to use the default prompt.")
+			.setName(tr("customPrompt"))
+			.setDesc(tr("customPromptDesc"))
 			.addTextArea((textarea) => {
 				textarea
 					.setPlaceholder(DEFAULT_LLM_SETTINGS.customPrompt)
@@ -490,8 +545,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Max tokens")
-			.setDesc("Maximum number of tokens to generate for the summary (10-10000)")
+			.setName(tr("maxTokens"))
+			.setDesc(tr("maxTokensDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("1000")
@@ -506,12 +561,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 			);
 
 			new Setting(containerEl)
-				.setName("Segmented summary threshold")
-				.setDesc(
-					"Transcripts exceeding this estimated token count will be split into chunks, " +
-					"each summarized independently, then merged. Lower = trigger segmentation more often. " +
-					"Default 4000 tokens (~16K characters). Set higher if your model has a large context window.",
-				)
+				.setName(tr("segmentedThreshold"))
+				.setDesc(tr("segmentedThresholdDesc"))
 				.addText((text) =>
 					text
 						.setPlaceholder("4000")
@@ -526,8 +577,8 @@ class YTranslateSettingTab extends PluginSettingTab {
 				);
 
 			new Setting(containerEl)
-			.setName("Target summary language")
-			.setDesc("Language for the output summary. LLM will translate the transcript content to this language. Select 'Auto' to use the same language as the transcript.")
+			.setName(tr("targetLanguage"))
+			.setDesc(tr("targetLanguageDesc"))
 			.addDropdown((dropdown) => {
 			const languages = [
 			{ value: "Auto", label: "Auto (follow transcript)" },

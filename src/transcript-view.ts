@@ -84,7 +84,7 @@ export class TranscriptView extends ItemView {
 	 * Loads a transcript from a YouTube URL
 	 * @param url - the YouTube URL
 	 */
-	private async loadTranscript(url: string): Promise<void> {
+	public async loadTranscript(url: string): Promise<void> {
 		this.currentUrl = url;
 
 		// Clear the content and recreate containers
@@ -138,6 +138,7 @@ export class TranscriptView extends ItemView {
 					this.plugin.settings.timestampMod,
 					""
 				);
+				this.renderSummaryButton();
 			}
 		} catch (error) {
 			// Hide loader and show error
@@ -410,6 +411,7 @@ export class TranscriptView extends ItemView {
 	 * @param state - the state to set
 	 */
 	async setEphemeralState(state: { url: string }): Promise<void> {
+	if (!state || !state.url) return;
 		const { url } = state;
 		await this.loadTranscript(url);
 	}
