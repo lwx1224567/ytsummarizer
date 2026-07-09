@@ -284,29 +284,25 @@ export default class YTranscriptPlugin extends Plugin {
 
 		} catch (error) {
 			console.error("Error creating transcript:", error);
-			const detail = error instanceof Error ? error.message : String(error);
-			new Notice(`Failed: ${detail}`);
-			// Try to update the file with error info
-			try {
-				const f = file;
-				if (f) {
-					await this.app.vault.process(f, (currentContent) => {
-						const idx = currentContent.indexOf("## Transcript");
+			var detail = error instanceof Error ? error.message : String(error);
+			new Notice("Failed: " + detail);
+			if (file) {
+				try {
+					await this.app.vault.process(file, function(currentContent: string) {
+						var idx = currentContent.indexOf("## Transcript");
 						if (idx >= 0) {
-							const before = currentContent.substring(0, idx);
-							return `${before}## Summary
-
-Failed: ${detail}
-
-`;
+							return currentContent.substring(0, idx)
+								+ "## Summary\n\nFailed to generate summary: " + detail + "\n\n";
 						}
-						return currentContent;
+						return "## Summary\n\nFailed to generate summary: " + detail + "\n\n" + currentContent;
 					});
+				} catch (e) {
+					console.error("Failed to write error to file:", e);
 				}
-			} catch (_) { /* ignore */ }
+			}
 		}
-	}
 
+		}
 	onunload() {
 		// Yaprakları ayırmak yerine sadece kaynakları temizle
 	}
