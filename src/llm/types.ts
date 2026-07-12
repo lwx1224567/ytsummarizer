@@ -56,6 +56,24 @@ export interface LLMProvider {
 		url: string,
 		onProgress?: (phase: string, done: number, total: number) => void,
 	): Promise<SegmentedSummaryResult>;
+	/**
+	 * Translates text into the specified target language.
+	 *
+	 * Uses a fixed, built-in translation prompt optimized for accuracy
+	 * and Markdown preservation. Non-streaming, single-call operation.
+	 *
+	 * @param text           The text to translate (typically a summary,
+	 *                       may include Markdown formatting).
+	 * @param targetLanguage Human-readable language name, matching the
+	 *                       values in the settings dropdown (e.g.
+	 *                       "Chinese", "Japanese", "French").
+	 * @returns              The translated text, preserving Markdown.
+	 * @throws               Error with descriptive message on failure.
+	 */
+	translateText(
+		text: string,
+		targetLanguage: string,
+	): Promise<string>;
 	updateSettings(settings: LLMSettings): void;
 	isConfigured(): boolean;
 }

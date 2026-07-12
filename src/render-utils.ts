@@ -28,7 +28,16 @@ export function splitTranscript(
 	const chunks: string[] = [];
 
 	let remaining = text;
+	let safetyCounter = 0;
+	const MAX_ITERATIONS = 1000;
 	while (remaining.length > 0) {
+		safetyCounter++;
+		if (safetyCounter > MAX_ITERATIONS) {
+			// Safety guard: should never happen unless there's a logic bug
+			console.warn("splitTranscript: safety limit reached, returning remaining text as final chunk");
+			chunks.push(remaining.trim());
+			break;
+		}
 		if (remaining.length <= maxChars) {
 			chunks.push(remaining.trim());
 			break;

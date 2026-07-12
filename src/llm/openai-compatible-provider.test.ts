@@ -222,6 +222,85 @@ describe("OpenAICompatibleProvider", () => {
 		});
 	});
 
+	describe("translateText", () => {
+			it("should return translated text on success", async () => {
+				const mockCreate = jest.fn().mockResolvedValue({
+					choices: [{ message: { content: "这是翻译后的文本。" } }],
+				});
+				MockedOpenAI.mockImplementation(
+					() =>
+						({
+							chat: { completions: { create: mockCreate } },
+						}) as unknown as OpenAI,
+				);
+
+				const provider = new OpenAICompatibleProvider(makeSettings());
+
+				const result = await provider.translateText(
+					"This is the summary text.",
+					"Chinese",
+				);
+
+				expect(result).toBe("这是翻译后的文本。");
+				expect(mockCreate).toHaveBeenCalledTimes(1);
+				expect(mockCreate).toHaveBeenCalledWith(
+					expect.objectContaining({
+						model: "gpt-4o-mini",
+						stream: false,
+					}),
+				);
+			});
+
+			it("should use translation-specific system prompt with target language", async () => {
+				const mockCreate = jest.fn().mockResolvedValue({
+					choices: [{ message: { content: "Texto traducido." } }],
+				});
+				MockedOpenAI.mockImplementation(
+					() =>
+						({
+							chat: { completions: { create: mockCreate } },
+						}) as unknown as OpenAI,
+				);
+
+				const provider = new OpenAICompatibleProvider(makeSettings());
+
+				await provider.translateText("Hello world.", "Spanish");
+
+				const callArgs = mockCreate.mock.calls[0][0];
+				expect(callArgs.messages[0].role).toBe("system");
+				expect(callArgs.messages[0].content).toContain("Spanish");
+				expect(callArgs.messages[0].content).toContain("Translate");
+				expect(callArgs.messages[1].role).toBe("user");
+				expect(callArgs.messages[1].content).toBe("Hello world.");
+			});
+
+			it("should throw descriptive error on API failure", async () => {
+				const mockCreate = jest.fn().mockRejectedValue(new Error("API key invalid"));
+				MockedOpenAI.mockImplementation(
+					() =>
+						({
+							chat: { completions: { create: mockCreate } },
+						}) as unknown as OpenAI,
+				);
+
+				const provider = new OpenAICompatibleProvider(makeSettings());
+
+				await expect(
+					provider.translateText("Some text", "Chinese"),
+				).rejects.toThrow("Translation failed");
+			});
+
+			it("should throw when client is not configured", async () => {
+				const provider = new OpenAICompatibleProvider(
+					makeSettings({ apiKey: "" }),
+				);
+
+				await expect(
+					provider.translateText("Text", "French"),
+				).rejects.toThrow("LLM is not configured");
+			});
+		});
+
 	describe("generateSegmentedSummary", () => {
 		it("should return single chunk when transcript fits in one chunk", async () => {
 			const mockCreate = jest.fn().mockResolvedValue({

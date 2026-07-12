@@ -66,8 +66,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
 			);
 		}
 
-		const systemPrompt =
-			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
+		const systemPrompt = this.resolvePrompt(
+			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt,
+			title,
+			url,
+		);
 
 		const langInstruction = this.getLanguageInstruction();
 
@@ -128,6 +131,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
 		}
 	}
 
+	/**
+	 * Replaces {title} and {url} placeholders in a prompt template.
+	 */
+	private resolvePrompt(template: string, title: string, url: string): string {
+		return template.replace(/\{title\}/g, title).replace(/\{url\}/g, url);
+	}
+
 		private getLanguageInstruction(): string {
 			const lang = this.settings.targetLanguage;
 			if (!lang || lang === "Auto" || lang === "English") return "";
@@ -146,8 +156,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
 		}
 
 		try {
-			const systemPrompt =
-				this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
+			const systemPrompt = this.resolvePrompt(
+				this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt,
+				title,
+				url,
+			);
 
 				const langInstruction = this.getLanguageInstruction();
 
@@ -198,8 +211,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
 		// ── Map phase: summarize each chunk ──
 		const chunkSummaries: ChunkSummary[] = [];
-		const mapPrompt =
-			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt;
+		const mapPrompt = this.resolvePrompt(
+			this.settings.customPrompt.trim() || DEFAULT_LLM_SETTINGS.customPrompt,
+			title,
+			url,
+		);
 
 			const langInstruction = this.getLanguageInstruction();
 
@@ -287,5 +303,67 @@ export class OpenAICompatibleProvider implements LLMProvider {
 		}
 
 		return { chunkSummaries, mergedSummary };
+	}
+
+	/**
+	 * Translates text into the target language using a fixed translation
+	 * system prompt. Non-streaming, with 60s timeout.
+	 */
+	public async translateText(
+		text: string,
+		targetLanguage: string,
+	): Promise<string> {
+		if (!this.client) {
+			throw new Error(
+				"LLM is not configured. Please set your API key / endpoint in the plugin settings.",
+			);
+		}
+
+		if (!text || !text.trim()) {
+			return "";
+		}
+
+		const translationPrompt =
+			`You are a professional translator. Translate the following text into ` +
+			`${targetLanguage}. Preserve the original meaning, tone, and formatting ` +
+			`(including Markdown). Do not add, omit, or summarize any content. ` +
+			`Output only the translated text — no explanations, notes, or prefatory ` +
+			`language.`;
+
+		try {
+			const response = await Promise.race([
+				this.client.chat.completions.create({
+					model: this.settings.model,
+					messages: [
+						{ role: "system", content: translationPrompt },
+						{ role: "user", content: text },
+					],
+					temperature: 0.3,
+					max_tokens: this.settings.maxTokens * 2,
+					stream: false,
+				}),
+				new Promise<never>((_, reject) =>
+					setTimeout(
+						() =>
+							reject(
+								new Error(
+									"Translation timed out after 60s. Please check your network or try again.",
+								),
+							),
+						60000,
+					),
+				),
+			]);
+
+			return (
+				response.choices[0]?.message?.content ||
+				"Failed to generate translation."
+			);
+		} catch (error) {
+			console.error("Translation API error:", error);
+			const detail =
+				error instanceof Error ? error.message : String(error);
+			throw new Error(`Translation failed: ${detail}`);
+		}
 	}
 }

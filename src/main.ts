@@ -101,6 +101,9 @@ export default class YTranscriptPlugin extends Plugin {
 			type: TRANSCRIPT_TYPE_VIEW,
 		});
 		this.app.workspace.revealLeaf(leaf);
+		// Track the URL for proper cleanup when leaf is closed
+		this.settings.leafUrls.push(url);
+		await this.saveSettings();
 		// Call the view directly instead of relying on setEphemeralState
 		const view = leaf.view as TranscriptView;
 		if (view) {
@@ -109,13 +112,14 @@ export default class YTranscriptPlugin extends Plugin {
 	}
 
 	async createNewPageWithTranscript(url: string) {
-		let file: TFile | undefined;
+		let fileForCatch: TFile | undefined;
 		try {
 			// Create a temporary file name
 			const tempFileName = `YouTube Transcript - Loading...`;
 
 			// First create an empty file
 			const file = await this.app.vault.create(`${tempFileName}.md`, `Loading transcript...\n\n[${url}](${url})`);
+				fileForCatch = file;
 
 			// Open the file
 			const leaf = this.app.workspace.getLeaf(false);
@@ -129,7 +133,7 @@ export default class YTranscriptPlugin extends Plugin {
 				country: this.settings.country,
 			});
 
-			if (!data || !data.lines) {
+			if (!data || !data.lines || data.lines.length === 0) {
 				await this.app.vault.process(file, (currentContent) => `Failed to get transcript!\n\n[${url}](${url})`);
 				new Notice("Failed to get transcript!");
 				return;
@@ -232,17 +236,26 @@ export default class YTranscriptPlugin extends Plugin {
 				let streamedSummary = "";
 				let writeTimer: ReturnType<typeof setTimeout> | null = null;
 
+				let writeGeneration = 0;
 				const debouncedFlush = () => {
 					if (writeTimer) clearTimeout(writeTimer);
+					const gen = ++writeGeneration;
 					writeTimer = setTimeout(async () => {
 						const text = streamedSummary;
+						// Ignore stale writes: if a new generation started, skip
+						if (gen !== writeGeneration) return;
 						await this.app.vault.process(file, (currentContent) => {
 							const transcriptIdx = currentContent.indexOf("## Transcript");
 							const beforeTranscript =
 								transcriptIdx >= 0
 									? currentContent.substring(0, transcriptIdx)
 									: currentContent;
-							return `${beforeTranscript}## Summary\n\n${text}\n\n`;
+							// Preserve the transcript section so it doesn't get lost
+							const afterTranscript =
+								transcriptIdx >= 0
+									? currentContent.substring(transcriptIdx)
+									: "";
+							return `${beforeTranscript}## Summary\n\n${text}\n\n${afterTranscript}`;
 						});
 					}, 300);
 				};
@@ -273,6 +286,36 @@ export default class YTranscriptPlugin extends Plugin {
 				}
 			}
 
+			// ── Translation section ──
+			const targetLang = this.settings.llm.targetLanguage;
+			const shouldTranslate =
+				targetLang &&
+				targetLang !== "Auto" &&
+				targetLang !== "English";
+
+			if (shouldTranslate) {
+				// Extract summary text from finalContent for translation
+				const summaryMatch = finalContent.match(/## Summary\n\n([\s\S]*?)(?=\n## |\n> |$)/);
+				const summaryForTranslation = summaryMatch ? summaryMatch[1].trim() : "";
+
+				if (summaryForTranslation && summaryForTranslation !== "Failed to generate summary.") {
+					try {
+						const translated = await this.llmService.translateText(
+							summaryForTranslation,
+							targetLang,
+						);
+						finalContent += `## ${targetLang}翻译 (Translation)\n\n${translated}\n\n`;
+					} catch (translationError) {
+						const detail =
+							translationError instanceof Error
+								? translationError.message
+								: String(translationError);
+						finalContent += `## ${targetLang}翻译 (Translation)\n\n*Translation failed: ${detail}*\n\n`;
+						console.error("Translation failed:", translationError);
+					}
+				}
+			}
+
 			// Append transcript
 			finalContent += `## Transcript\n\n`;
 			finalContent += `> [!faq]- Transcript Content\n`;
@@ -286,9 +329,9 @@ export default class YTranscriptPlugin extends Plugin {
 			console.error("Error creating transcript:", error);
 			var detail = error instanceof Error ? error.message : String(error);
 			new Notice("Failed: " + detail);
-			if (file) {
+			if (fileForCatch) {
 				try {
-					await this.app.vault.process(file, function(currentContent: string) {
+					await this.app.vault.process(fileForCatch, function(currentContent: string) {
 						var idx = currentContent.indexOf("## Transcript");
 						if (idx >= 0) {
 							return currentContent.substring(0, idx)
@@ -308,7 +351,13 @@ export default class YTranscriptPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const loaded = await this.loadData();
+		let loaded: Record<string, unknown> | null = {};
+		try {
+			loaded = await this.loadData();
+		} catch (error) {
+			console.error("Failed to load settings (corrupted data.json?), using defaults:", error);
+			loaded = {};
+		}
 		// Migrate legacy `openai` config block into the new `llm` block.
 		const raw = loaded as Record<string, unknown> | null;
 		if (raw && raw.openai && !raw.llm) {
@@ -357,8 +406,14 @@ class YTranslateSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		const lang = this.plugin.settings.uiLanguage || "en";
-		function tr(key: Parameters<typeof t>[1]): string {
-			return t(lang, key);
+		function tr(key: Parameters<typeof t>[1], replacements?: Record<string, string>): string {
+			let text = t(lang, key);
+			if (replacements) {
+				for (const [k, v] of Object.entries(replacements)) {
+					text = text.replace(`{${k}}`, v);
+				}
+			}
+			return text;
 		}
 
 		// ── UI Language ──
@@ -470,7 +525,7 @@ class YTranslateSettingTab extends PluginSettingTab {
 			.setDesc(
 				!preset || preset.needsApiKey
 					? preset && preset.helpUrl
-						? `Get your key from ${preset.helpUrl}`
+						? tr("apiKeyDescHelpUrl", { url: preset.helpUrl })
 						: tr("apiKeyDescDefault")
 					: tr("apiKeyDescOllama"),
 			)

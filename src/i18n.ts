@@ -18,6 +18,7 @@ export interface LocaleDict {
 	apiKey: string;
 	apiKeyDescDefault: string;
 	apiKeyDescOllama: string;
+	apiKeyDescHelpUrl: string;
 	notRequired: string;
 	model: string;
 	modelDescSelect: string;
@@ -52,6 +53,7 @@ const en: LocaleDict = {
 	apiKeyDescDefault: "Enter your API key",
 	apiKeyDescOllama: "Ollama does not require an API key — leave empty.",
 	notRequired: "(not required)",
+	apiKeyDescHelpUrl: "Get your key from {url}",
 	model: "Model",
 	modelDescSelect: "Select the model to use",
 	modelDescCustom:
@@ -91,6 +93,7 @@ const zh: LocaleDict = {
 	apiKey: "API 密钥",
 	apiKeyDescDefault: "输入你的 API 密钥",
 	apiKeyDescOllama: "Ollama 不需要 API 密钥 — 留空即可。",
+	apiKeyDescHelpUrl: "从 {url} 获取你的密钥",
 	notRequired: "（不需要）",
 	model: "模型",
 	modelDescSelect: "选择要使用的模型",
