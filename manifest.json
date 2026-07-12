@@ -3,7 +3,7 @@
 	"name": "YTSummarizer",
 	"version": "0.2.6",
 	"minAppVersion": "1.7.2",
-	"description": "Fetches YouTube transcripts and generates summaries using OpenAI GPT models",
+	"description": "Fetch YouTube transcripts and generate AI summaries with streaming, map-reduce, and multi-language translation — supports OpenAI, DeepSeek, 智谱 GLM, Gemini, Ollama, and custom endpoints",
 	"author": "Arda Kalaycı",
 	"authorUrl": "https://github.com/ardakalayci",
 	"isDesktopOnly": false

@@ -1,6 +1,6 @@
 # YTSummarizer
 
-An Obsidian plugin that fetches YouTube transcripts and generates AI-powered summaries using multiple LLM providers — OpenAI, DeepSeek, 智谱 GLM, Google Gemini, Ollama (local), or any OpenAI-compatible endpoint.
+An Obsidian plugin that fetches YouTube transcripts and generates AI-powered summaries with **streaming output**, **map-reduce segmented summarization**, and **multi-language translation** — powered by 6 LLM providers (OpenAI, DeepSeek, 智谱 GLM, Google Gemini, Ollama local, or any OpenAI-compatible endpoint).
 
 ## Screenshots
 
@@ -180,23 +180,65 @@ This plugin follows Obsidian's security guidelines:
 ## Architecture
 
 ```
+src/
+├── main.ts                    ← Plugin entry: ribbon, commands, settings UI
+├── fetch-transcript.ts        ← Parse YouTube HTML, extract caption XML,
+│                                decode entities, detect language
+├── transcript-view.ts         ← Sidebar: render timestamps, search, copy, drag
+├── prompt-modal.ts            ← URL input modal with action picker
+├── render-utils.ts            ← Markdown rendering, token estimation,
+│                                transcript chunking (for map-reduce)
+├── i18n.ts                    ← Locale strings (en / zh) for settings UI
+├── timestampt-utils.ts        ← Timestamp formatting helpers
+├── url-utils.ts               ← YouTube URL validation & extraction
+├── types.ts                   ← Shared domain types
+│
+└── llm/
+    ├── types.ts               ← LLMSettings, LLMProvider interface,
+    │                            ChunkSummary, SegmentedSummaryResult
+    ├── provider-registry.ts   ← 6 preset providers (OpenAI, DeepSeek,
+    │                            智谱 GLM, Gemini, Ollama, Custom)
+    ├── llm-service.ts         ← Factory: createLLMProvider(settings)
+    └── openai-compatible-provider.ts  ← Unified OpenAI-compatible client
+         ├── generateSummary()           Non-streaming (fallback)
+         ├── generateSummaryStream()     Streaming (primary, with fallback)
+         ├── generateSegmentedSummary()  Map-Reduce for long transcripts
+         └── translateText()             Multi-language translation
+```
+
+**Data flow:**
+
+```
 YouTube URL
     │
     ▼
-fetch-transcript.ts          ← Parse YouTube page, extract caption XML
+fetch-transcript.ts          ← Fetch & parse, return transcript segments
     │
-    ├──→ transcript-view.ts  ← Sidebar: render timestamps, search, copy
+    ├──→ transcript-view.ts  ← Sidebar: render, search, copy, click-to-seek
     │
-    └──→ main.ts             ← New page: build Markdown, route to LLM
+    └──→ main.ts             ← New page mode
               │
-              ▼
-         llm/llm-service.ts  ← Factory: createLLMProvider()
+              ├── Build Markdown note with transcript (collapsed)
               │
-              ▼
-    llm/openai-compatible-provider.ts
-       ├── generateSummary()            ← Non-streaming (fallback)
-       ├── generateSummaryStream()      ← Streaming (primary)
-       └── generateSegmentedSummary()   ← Map-Reduce (long transcripts)
+              └── Route to LLM for summary
+                    │
+                    ▼
+               llm/llm-service.ts  ← createLLMProvider() factory
+                    │
+                    ▼
+          llm/openai-compatible-provider.ts
+                    │
+                    ├── Short transcript → generateSummaryStream()
+                    │     (real-time streaming to note)
+                    │
+                    └── Long transcript → generateSegmentedSummary()
+                          (split → map each chunk → reduce merge)
+                    │
+                    ▼
+              translateText() (if target language ≠ "Auto")
+                    │
+                    ▼
+              Write summary to Markdown note
 ```
 
 ## Acknowledgments
